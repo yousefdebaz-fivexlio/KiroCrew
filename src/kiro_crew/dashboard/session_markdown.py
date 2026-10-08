@@ -322,16 +322,28 @@ _RENDERED_RAW_TEXT_TAGS = (
 #: Of those, the ones whose content an HTML parser does not parse at all, so a
 #: tracked opener inside them is text and only their own close tag counts.
 _OPAQUE_RENDERED_TAGS = frozenset(_RENDERED_RAW_TEXT_TAGS) - {"pre"}
+#: The tag name must be followed by whitespace, ``/``, ``>`` or the END OF THE
+#: LINE: an HTML tag may break its attributes across lines, so ``<script`` alone
+#: on a line is as real an opener as ``<script>`` — the ``>`` arrives on a later
+#: line. ``end`` is empty exactly when that happens, and the caller carries the
+#: still-open tag into the next line (:func:`_track_raw_text_elements`).
 _RAW_TEXT_ELEMENT_RE = re.compile(
-    r"<(?P<close>/)?(?P<tag>" + "|".join(_RENDERED_RAW_TEXT_TAGS) + r")(?=[ \t/>])[^>]*>",
+    r"<(?P<close>/)?(?P<tag>"
+    + "|".join(_RENDERED_RAW_TEXT_TAGS)
+    + r")(?=[ \t/>]|$)[^>]*(?P<end>>)?",
     re.IGNORECASE,
 )
 
 
 def _track_raw_text_elements(
-    line: str, open_tags: list[str], *, in_comment: bool = False, markdown: bool = True
-) -> None:
-    """Update rendered raw-text *open_tags* after *line*.
+    line: str,
+    open_tags: list[str],
+    *,
+    in_comment: bool = False,
+    markdown: bool = True,
+    in_tag: bool = False,
+) -> bool:
+    """Update rendered raw-text *open_tags* after *line*; return the open-tag state.
 
     Unlike a CommonMark HTML block, one of these elements may start inline or
     behind quote/list markers and survives the Markdown container that emitted
@@ -347,22 +359,34 @@ def _track_raw_text_elements(
     passes ``markdown=False`` and the line is scanned as written: masking there
     would hide a ``<script>`` the renderer really opens, and withhold the only
     closer it needed.
+
+    *in_tag* is whether the previous line ended inside a tracked tag whose
+    ``>`` had not yet arrived — ``<script`` on one line and ``type="…">`` on the
+    next is one tag to an HTML parser, and the element it opens is as real as
+    one written on a single line. The return value is that state after *line*,
+    so the caller threads it through; until the ``>`` is found the text is the
+    tag's own attributes and opens nothing else.
     """
     scanned = mask_inline_code(line) if markdown else line
     masked, _ = _mask_html_comments(scanned, in_comment)
     cursor = 0
+    if in_tag:
+        end = masked.find(">")
+        if end < 0:
+            return True
+        cursor = end + 1
     while cursor < len(masked):
         if open_tags and open_tags[-1] in _OPAQUE_RENDERED_TAGS:
             tag = open_tags[-1]
             close = re.search(rf"</{re.escape(tag)}[ \t]*>", masked[cursor:], re.I)
             if close is None:
-                return
+                return False
             cursor += close.end()
             open_tags.pop()
             continue
         match = _RAW_TEXT_ELEMENT_RE.search(masked, cursor)
         if match is None:
-            return
+            return False
         cursor = match.end()
         tag = match.group("tag").lower()
         if match.group("close"):
@@ -370,6 +394,9 @@ def _track_raw_text_elements(
                 del open_tags[len(open_tags) - 1 - open_tags[::-1].index(tag)]
         else:
             open_tags.append(tag)
+        if not match.group("end"):
+            return True
+    return False
 
 
 #: Conditions 6 and 7 instead end at a BLANK LINE, so an unterminated one is
@@ -551,7 +578,13 @@ _PARAGRAPH_END_RE = re.compile(
     )""",
     re.VERBOSE,
 )
-_SETEXT_UNDERLINE_RE = re.compile(r"^[ ]{0,3}=+[ \t]*$")
+#: A setext underline in its OWN container (CommonMark §4.3): ``=`` for an h1,
+#: ``-`` for an h2. Both end the paragraph above them. A hyphen run of three or
+#: more is also a thematic break, but after paragraph text the setext reading
+#: wins — and either way the paragraph is over, which is all that is asked here.
+#: Only consulted while a paragraph is open: at a block start ``--`` is text
+#: and ``-`` is an empty list item.
+_SETEXT_UNDERLINE_RE = re.compile(r"^[ ]{0,3}(?:=+|-+)[ \t]*$")
 
 
 def _interrupts_a_paragraph(line: str) -> bool:
@@ -750,6 +783,20 @@ def _unterminated_blocks(content: str) -> str:
     # after it can be asked whether that quote is still open. Empty for a
     # comment that began anywhere else.
     comment_steps: list[tuple[str, int]] = []
+    # Whether the previous line ended inside a tracked HTML tag whose ">" has
+    # not arrived yet (:func:`_track_raw_text_elements`).
+    raw_in_tag = False
+    # Block quotes are not tracked as containers — a fence inside one is closed
+    # by the quote ending, so nothing in a quote draws a closer. What IS tracked
+    # is the one way a quote reaches past its own lines: a paragraph open inside
+    # it may be LAZILY continued by an unquoted line (CommonMark §5.1). That
+    # line belongs to the quote, not to the top level: it opens no paragraph
+    # there, and a list or HTML block on the line after it starts freely — the
+    # quote did not match that line, so there is no paragraph to interrupt.
+    # ``quote_fence`` keeps a fence inside the quote from reading as a paragraph.
+    paragraph_in_quote = False
+    quote_fence: tuple[str, int] | None = None
+    quote_fence_depth = 0
     at_paragraph_start = True
     for raw_line in content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         # CommonMark measures leading indentation in columns with tab stops of 4;
@@ -827,7 +874,9 @@ def _unterminated_blocks(content: str) -> str:
             active_indent = raw_indent if raw_terminator else blank_indent
             # Every line here is raw HTML, so backticks are text and the tags
             # between them are emitted as written.
-            _track_raw_text_elements(line, output_raw_tags, in_comment=in_comment, markdown=False)
+            raw_in_tag = _track_raw_text_elements(
+                line, output_raw_tags, in_comment=in_comment, markdown=False, in_tag=raw_in_tag
+            )
             _, in_comment = _mask_html_comments(line, in_comment)
             if in_comment and not was_in_comment:
                 comment_indent = active_indent
@@ -852,8 +901,57 @@ def _unterminated_blocks(content: str) -> str:
             comment_list_depth = 0
             comment_blocks_markdown = True
             comment_steps = _container_steps(line)
+            paragraph_in_quote = False
             at_paragraph_start = True
             continue
+
+        quote_depth = comment_prefix_candidate.count(">")
+        if quote_depth:
+            # A quoted line. Its innermost content decides whether the quote
+            # leaves a paragraph open for an unquoted line to continue lazily.
+            if quote_fence is not None and quote_depth < quote_fence_depth:
+                quote_fence = None
+            if quote_fence is not None:
+                if fence_closes(comment_candidate, *quote_fence):
+                    quote_fence = None
+                paragraph_in_quote = False
+            elif (quoted_fence := fence_opening(comment_candidate)) is not None:
+                quote_fence, quote_fence_depth = quoted_fence, quote_depth
+                paragraph_in_quote = False
+            else:
+                paragraph_in_quote = bool(
+                    comment_candidate.strip()
+                    and not comment_candidate.startswith("    ")
+                    and not _interrupts_a_paragraph(comment_candidate)
+                    and not _opens_blank_terminated_html_block(
+                        comment_candidate, at_paragraph_start=True
+                    )
+                )
+        elif paragraph_in_quote or quote_fence is not None:
+            # An unquoted line ends the quote — unless it is plain text, which
+            # lazily continues the quote's open paragraph. A block start of ANY
+            # kind ends it: the quote did not match this line, so its paragraph
+            # is not the container here and cannot be "interrupted", and a list
+            # marker that could not interrupt a paragraph starts a list. A
+            # setext-looking line is NOT a block start: an underline cannot be
+            # lazy (CommonMark §4.3, example 94), so it stays paragraph text
+            # inside the quote and the quote stays open.
+            quote_fence = None
+            if (
+                paragraph_in_quote
+                and line.strip()
+                and not _interrupts_a_paragraph(line)
+                and not _opens_blank_terminated_html_block(line, at_paragraph_start=True)
+                and _list_item_content_column(_expand_marker_tabs(line)) is None
+            ):
+                # Lazy continuation: the line belongs to the quote's paragraph,
+                # opens nothing at the top level, and leaves every open list
+                # container exactly as it was. Its inline HTML still renders.
+                raw_in_tag = _track_raw_text_elements(
+                    line, output_raw_tags, in_comment=in_comment, in_tag=raw_in_tag
+                )
+                continue
+            paragraph_in_quote = False
 
         expanded = _expand_marker_tabs(line)
         indent = len(line) - len(line.lstrip(" "))
@@ -891,7 +989,9 @@ def _unterminated_blocks(content: str) -> str:
         elif list_column and not at_paragraph_start and not _interrupts_a_paragraph(line):
             # Lazy continuation remains in the current list item, and its inline
             # HTML still reaches the rendered output.
-            _track_raw_text_elements(line, output_raw_tags, in_comment=in_comment)
+            raw_in_tag = _track_raw_text_elements(
+                line, output_raw_tags, in_comment=in_comment, in_tag=raw_in_tag
+            )
             continue
         else:
             list_columns.clear()
@@ -916,11 +1016,12 @@ def _unterminated_blocks(content: str) -> str:
             # A line that opens an HTML block is raw HTML from its first
             # character, so its backticks are text rather than inline code and
             # a tag between them is really emitted; any other line is Markdown.
-            _track_raw_text_elements(
+            raw_in_tag = _track_raw_text_elements(
                 line,
                 output_raw_tags,
                 in_comment=in_comment,
                 markdown=not (opens_comment or raw is not None or opens_blank_terminated),
+                in_tag=raw_in_tag,
             )
             if raw_terminator and raw_terminator in line.lower():
                 raw_terminator, raw_indent, raw_blocks_markdown = "", 0, False
@@ -977,10 +1078,15 @@ def _unterminated_blocks(content: str) -> str:
                 comment_list_depth = len(list_columns)
                 comment_blocks_markdown = False
                 comment_steps = []
+        # An EMPTY list item marker (``-`` alone) holds no paragraph, so the next
+        # line is at a block start: a nested marker there opens a nested item
+        # rather than failing to "interrupt" a paragraph that does not exist,
+        # and a dedented text line is a new paragraph, not a lazy continuation.
         at_paragraph_start = bool(
             block_started
             or indented_code
             or not line.strip()
+            or (marker_column is not None and not block_line.strip())
             or _PARAGRAPH_END_RE.match(block_line)
             or (not at_paragraph_start and _SETEXT_UNDERLINE_RE.match(block_line))
         )

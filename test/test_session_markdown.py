@@ -1549,3 +1549,146 @@ def test_gpt_8_the_markdown_raw_block_set_is_unchanged():
     assert sm._opens_raw_html_block("<iframe>") is None
     assert sm._unterminated_blocks("<title>x") == "</title>"
     assert sm._unterminated_blocks("<pre>\n<title>x\n</pre>") == "</title>\n</pre>"
+
+
+# ── fork-lane review, second round ──
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ('<div>\n<script\n type="text/javascript">', "</script>"),
+        ("<script\nsrc=x>", "</script>"),
+        ("text <script\nsrc=x>\nmore", "</script>"),
+        ("<div>\n<script\nsrc=x>\n</script>", ""),
+        ("<div>\n<script\nsrc=x>\nstill attributes\n>", "</script>"),
+    ],
+    ids=["blank-html", "raw-html", "inline", "closed", "three-line-tag"],
+)
+def test_gpt_9_a_tag_broken_across_lines_still_opens_its_element(content, closer):
+    # An HTML tag may put its attributes on later lines, so "<script" alone on
+    # a line and "type=…>" on the next is ONE tag to a browser. The scanner
+    # read each line on its own and required the ">" on the opener's line, so
+    # the element was never tracked and every later turn rendered as script
+    # text. The open-tag state is now carried across lines, and until the ">"
+    # arrives the text is the tag's own attributes.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("Heading\n--\n2. item\n   ```python\n   code", ""),
+        ("Heading\n-\n2. item\n   ```python\n   code", ""),
+        ("- item\n  Heading\n  --\n  ```py", ""),
+        ("para\n--\n```py", "```"),
+        ("--\n```py", "```"),
+        ("text\n-\n2. item\n   ```py", ""),
+    ],
+    ids=["h2-then-list", "single-hyphen", "in-list", "top-fence", "no-paragraph", "lone-hyphen"],
+)
+def test_gpt_10_a_hyphen_setext_underline_ends_the_paragraph(content, closer):
+    # "--" under paragraph text is a setext h2 underline, exactly as "===" is an
+    # h1 underline, and it ends the paragraph. Only "=" was recognised, so the
+    # paragraph was read as still open, an ordered list starting above 1 could
+    # not "interrupt" it, and the list item's own fence was taken as top-level:
+    # its manufactured closer opened a new fence over every later turn. A lone
+    # "-" after text is the same underline (an empty item cannot interrupt a
+    # paragraph); at a block start "--" is plain text and opens nothing.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("-\n  +\ntext\n  ```py", "```"),
+        ("- a\n-\ntext\n  ```py", "```"),
+        ("-\n  text\n  ```py", ""),
+    ],
+    ids=["nested-empty-items", "sibling-empty-item", "item-filled-later"],
+)
+def test_gpt_11_an_empty_list_item_opens_no_paragraph(content, closer):
+    # "-" alone is an empty item: it holds no paragraph, so the next line is at
+    # a block start. A nested marker there opens a nested (empty) item, and a
+    # dedented text line is a NEW top-level paragraph, not a lazy continuation
+    # of a paragraph that never existed. The scanner left the paragraph flag
+    # set after the marker line, so "text" was read as lazy continuation, the
+    # list stayed open, and the fence after it was attributed to the item and
+    # went unclosed. Text indented INTO the empty item does fill it, and a
+    # fence there is still the item's.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("> quote\ncontinued\n2. item\n   ```py", ""),
+        ("> quote\n2. item\n   ```py", ""),
+        ("> quote\ncontinued\n```py", "```"),
+        ("> quote\ncontinued\n--\n2. item\n   ```py", ""),
+        ("> quote\ncontinued\n<div>\n```py", ""),
+        ("> ```\n> code\ncontinued\n2. item\n   ```py", "```"),
+        ("> > quote\n> text\n2. item\n   ```py", ""),
+        ("- item\n  > quote\ncontinued\n  ```py", ""),
+        ("> quote\n\n2. item\n   ```py", ""),
+    ],
+    ids=[
+        "lazy-then-list",
+        "list-right-after",
+        "lazy-then-fence",
+        "lazy-setext-is-text",
+        "lazy-then-html",
+        "quoted-fence-not-lazy",
+        "nested-quote",
+        "quote-in-list-item",
+        "blank-ends-quote",
+    ],
+)
+def test_gpt_12_a_lazy_quote_continuation_opens_no_top_level_paragraph(content, closer):
+    # "continued" after "> quote" is a LAZY continuation of the quote's
+    # paragraph (CommonMark §5.1), not a top-level paragraph. The scanner read
+    # it as one, so "2. item" — which cannot interrupt a paragraph — was taken
+    # as text, and the item's fence as a top-level one whose closer opened a
+    # fence over every later turn. In fact the quote did not match that line,
+    # so its paragraph is not the container there: the list starts, and the
+    # fence is the item's. A setext-looking line is lazy text too (an underline
+    # cannot be lazy, example 94); a quoted FENCE is not a paragraph, so the
+    # line after it ends the quote and is a real paragraph; and a lazy line
+    # inside a list item leaves the item open.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
