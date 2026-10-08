@@ -2373,17 +2373,24 @@ that is what the dashboard renders — so escaping it would destroy the fenced c
 blocks, tables and lists this format exists to preserve. The content is also
 already egress-redacted, because it is the same bundle text §14.7 ships. The one
 structural consequence is handled: a message ending inside an unterminated code
-fence, or inside an HTML block that outlives a blank line (`<pre`, `<script`,
+fence, or inside an HTML construct that outlives a blank line (`<pre`, `<script`,
 `<style`, `<textarea`, `<!--`, a `<?` processing instruction, a `<!` declaration,
-or `<![CDATA[`), would otherwise render or hide every later turn — silent loss at
+`<![CDATA[`, or an element a browser reads as raw text until its own close tag such
+as `<title>`), would otherwise render or hide every later turn — silent loss at
 read time — so the renderer closes it at the message boundary. Detection matters in
 BOTH directions, because a manufactured closer is itself content and a bare fence
 line is a valid opener: closing a construct that was never open swallows the rest
-of the document just as surely. So a fence inside a list item draws no closer — the
-`---` separator before the next heading is dedented past the item's content
-column, which ends the item and its fence — fence-looking lines inside an HTML
-block are read as the raw text they are, and an HTML block that ends at a blank
-line is left alone because the blank line already closed it. The title is collapsed
+of the document just as surely. So the renderer never guesses what is open: it
+parses each message with a CommonMark reference implementation (`markdown-it-py`,
+a runtime dependency for this reason) exactly as it will land in the file, followed
+by the separator and a stand-in for the next heading, and adds a closer only when
+the parser reports that heading swallowed — the closer the swallowing block itself
+names. The rendered HTML is then read by a small HTML tokenizer for what a browser
+would still have open (a comment, an unfinished tag, a raw-text element), and that
+is closed too. Every closer is re-verified by the same parse before it is accepted.
+A fence inside a list item or block quote therefore draws no closer, and needs
+none: the `---` separator before the next heading ends the container and the fence
+with it, and the parser says so. The title is collapsed
 to one line for the same reason: a heading is one line, so a newline in a
 user-renamed title would otherwise put a second, unescaped block beneath it. The
 provenance table is the only place a value is escaped, since an unescaped `|` there

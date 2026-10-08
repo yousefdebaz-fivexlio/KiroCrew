@@ -255,11 +255,11 @@ def test_a_comment_after_a_lazy_continuation_is_closed_inside_the_item():
     # ended, a bare `-->` closer would land at column 0 as a PARAGRAPH, which
     # CommonMark escapes to `--&gt;`, leaving the comment open over every later
     # turn. The self-contained `<!-- -->` closer is immune to that regardless --
-    # it is still indented into the item here because the item IS correctly
-    # still open, not because the closer format requires it.
+    # it is written at the left margin, where it is its own HTML block whether
+    # the item is still open or not.
     opener = "<" + "!--"
     content = f"- item\ncontinued\n  {opener} note"
-    assert sm._unterminated_blocks(content) == "  <!-- -->"
+    assert sm._unterminated_blocks(content) == "<!-- -->"
     out = _render(
         _bundle(
             [
@@ -268,7 +268,7 @@ def test_a_comment_after_a_lazy_continuation_is_closed_inside_the_item():
             ]
         )
     )
-    assert "\n  <!-- -->\n" in out
+    assert "\n<!-- -->\n" in out
     _assert_later_heading_is_structural(out)
 
 
@@ -438,9 +438,12 @@ def test_a_comment_inside_raw_html_is_closed_before_its_enclosing_block(content,
     _assert_later_heading_is_structural(out)
 
 
-def test_an_unterminated_raw_html_block_inside_a_list_gets_an_indented_closer():
+def test_an_unterminated_raw_html_block_inside_a_list_is_closed():
+    # The closer is written at the left margin: a `</script>` line is raw HTML
+    # wherever it lands, and a browser needs it whether or not the list item
+    # that opened the element is still open in Markdown.
     content = "- <script>\n  unfinished"
-    assert sm._unterminated_blocks(content) == "  </script>"
+    assert sm._unterminated_blocks(content) == "</script>"
     out = _render(
         _bundle(
             [
@@ -449,7 +452,7 @@ def test_an_unterminated_raw_html_block_inside_a_list_gets_an_indented_closer():
             ]
         )
     )
-    assert out.index("  </script>") < out.index("## User")
+    assert out.index("</script>") < out.index("## User")
     _assert_later_heading_is_structural(out)
 
 
@@ -660,9 +663,9 @@ def test_a_comment_opened_inside_a_container_is_still_closed():
 def test_a_comment_closer_for_a_list_item_is_indented_into_the_item():
     # A bare `-->` written at the left margin is a PARAGRAPH, not raw HTML --
     # CommonMark escapes it to `--&gt;` and the comment stays open; the
-    # self-contained `<!-- -->` closer is immune to that, and is still indented
-    # to the item's content column here because the item continues to own the
-    # HTML block it opened.
+    # self-contained `<!-- -->` closer is immune to that, so it is written at the
+    # left margin rather than indented into the item: there it is its own HTML
+    # block, and the comment it closes does not care which construct emits it.
     opener = "<" + "!--"
     content = f"- {opener} unfinished"
     out = _render(
@@ -673,7 +676,7 @@ def test_a_comment_closer_for_a_list_item_is_indented_into_the_item():
             ]
         )
     )
-    assert "\n  <!-- -->\n" in out
+    assert "\n<!-- -->\n" in out
     _assert_no_unclosed_comment_before_later_heading(out)
 
 
@@ -1138,9 +1141,11 @@ def test_html_container_exit_keeps_the_comment_effective_outside_later_code_fenc
     _assert_later_heading_is_structural(out)
 
 
-def test_a_comment_opened_in_a_blockquote_gets_a_quoted_closer():
+def test_a_comment_opened_in_a_blockquote_is_closed():
+    # Bare, not quoted: the quote ends at the blank line before the separator
+    # either way, and `<!-- -->` at the left margin is its own HTML block.
     content = "> <!-- unfinished"
-    assert sm._unterminated_blocks(content) == "> <!-- -->"
+    assert sm._unterminated_blocks(content) == "<!-- -->"
     out = _render(
         _bundle(
             [
@@ -1233,7 +1238,7 @@ def test_h3_a_comment_inside_a_quoted_list_item_is_detected_and_closed():
     # "> - <!--" is a quote containing a list item containing a comment -- was
     # never detected at all, and no closer was ever emitted.
     content = "> - <!-- unfinished"
-    assert sm._unterminated_blocks(content) == "> - <!-- -->"
+    assert sm._unterminated_blocks(content) == "<!-- -->"
     out = _render(
         _bundle(
             [
@@ -1380,7 +1385,7 @@ def test_gpt_5_unicode_digits_do_not_start_a_commonmark_list():
         ("- a\nfoo <script>", "</script>"),
         ("1.\nfoo <script>", "</script>"),
         # A tab-indented continuation line is still inside the item's HTML block.
-        ("* <div>\n\t<!--", "  <!-- -->"),
+        ("* <div>\n\t<!--", "<!-- -->"),
         # An empty item holds no paragraph, so a dedented line ends it and the
         # following fence is top level.
         ("-\nx\n  ```", "```"),
@@ -1459,8 +1464,8 @@ def test_gpt_6_a_quoted_comment_releases_the_markdown_when_its_quote_ends(conten
 @pytest.mark.parametrize(
     "content,closer",
     [
-        ("> <!--\n> ```\n> code", "> <!-- -->"),
-        ("> - <!--\n>\n>   ```\n>   code", "> - <!-- -->"),
+        ("> <!--\n> ```\n> code", "<!-- -->"),
+        ("> - <!--\n>\n>   ```\n>   code", "<!-- -->"),
     ],
     ids=["quoted-fence", "quoted-item-blank-then-fence"],
 )
@@ -1540,12 +1545,293 @@ def test_gpt_8_rcdata_and_raw_text_elements_outside_commonmarks_set_are_closed(t
     _assert_later_heading_is_structural(out)
 
 
-def test_gpt_8_the_markdown_raw_block_set_is_unchanged():
-    # Widening the RENDERED set must not widen the MARKDOWN one: a <title> line
-    # still opens a blank-terminated block (closed by the blank line before the
-    # separator), not a raw block that would draw a column-0 terminator of its
-    # own on top of the rendered-element closer.
-    assert sm._opens_raw_html_block("<title>") is None
-    assert sm._opens_raw_html_block("<iframe>") is None
+def test_gpt_8_a_title_draws_only_the_element_closer():
+    # <title> is a blank-terminated block in Markdown (closed by the blank line
+    # before the separator) and a raw-text element in a browser: it draws the
+    # element closer and nothing else, and an element opened inside <pre> is
+    # closed before the </pre> that ends both the element and the block.
     assert sm._unterminated_blocks("<title>x") == "</title>"
     assert sm._unterminated_blocks("<pre>\n<title>x\n</pre>") == "</title>\n</pre>"
+
+
+# ── fork-lane review, second round ──
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ('<div>\n<script\n type="text/javascript">', "</script>"),
+        ("<script\nsrc=x>", "</script>"),
+        ("text <script\nsrc=x>\nmore", "</script>"),
+        ("<div>\n<script\nsrc=x>\n</script>", ""),
+        ("<div>\n<script\nsrc=x>\nstill attributes\n>", "</script>"),
+    ],
+    ids=["blank-html", "raw-html", "inline", "closed", "three-line-tag"],
+)
+def test_gpt_9_a_tag_broken_across_lines_still_opens_its_element(content, closer):
+    # An HTML tag may put its attributes on later lines, so "<script" alone on
+    # a line and "type=…>" on the next is ONE tag to a browser. The scanner
+    # read each line on its own and required the ">" on the opener's line, so
+    # the element was never tracked and every later turn rendered as script
+    # text. The open-tag state is now carried across lines, and until the ">"
+    # arrives the text is the tag's own attributes.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("Heading\n--\n2. item\n   ```python\n   code", ""),
+        ("Heading\n-\n2. item\n   ```python\n   code", ""),
+        ("- item\n  Heading\n  --\n  ```py", ""),
+        ("para\n--\n```py", "```"),
+        ("--\n```py", "```"),
+        ("text\n-\n2. item\n   ```py", ""),
+    ],
+    ids=["h2-then-list", "single-hyphen", "in-list", "top-fence", "no-paragraph", "lone-hyphen"],
+)
+def test_gpt_10_a_hyphen_setext_underline_ends_the_paragraph(content, closer):
+    # "--" under paragraph text is a setext h2 underline, exactly as "===" is an
+    # h1 underline, and it ends the paragraph. Only "=" was recognised, so the
+    # paragraph was read as still open, an ordered list starting above 1 could
+    # not "interrupt" it, and the list item's own fence was taken as top-level:
+    # its manufactured closer opened a new fence over every later turn. A lone
+    # "-" after text is the same underline (an empty item cannot interrupt a
+    # paragraph); at a block start "--" is plain text and opens nothing.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("-\n  +\ntext\n  ```py", "```"),
+        ("- a\n-\ntext\n  ```py", "```"),
+        ("-\n  text\n  ```py", ""),
+    ],
+    ids=["nested-empty-items", "sibling-empty-item", "item-filled-later"],
+)
+def test_gpt_11_an_empty_list_item_opens_no_paragraph(content, closer):
+    # "-" alone is an empty item: it holds no paragraph, so the next line is at
+    # a block start. A nested marker there opens a nested (empty) item, and a
+    # dedented text line is a NEW top-level paragraph, not a lazy continuation
+    # of a paragraph that never existed. The scanner left the paragraph flag
+    # set after the marker line, so "text" was read as lazy continuation, the
+    # list stayed open, and the fence after it was attributed to the item and
+    # went unclosed. Text indented INTO the empty item does fill it, and a
+    # fence there is still the item's.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("> quote\ncontinued\n2. item\n   ```py", ""),
+        ("> quote\n2. item\n   ```py", ""),
+        ("> quote\ncontinued\n```py", "```"),
+        ("> quote\ncontinued\n--\n2. item\n   ```py", ""),
+        ("> quote\ncontinued\n<div>\n```py", ""),
+        ("> ```\n> code\ncontinued\n2. item\n   ```py", "```"),
+        ("> > quote\n> text\n2. item\n   ```py", ""),
+        ("- item\n  > quote\ncontinued\n  ```py", ""),
+        ("> quote\n\n2. item\n   ```py", ""),
+    ],
+    ids=[
+        "lazy-then-list",
+        "list-right-after",
+        "lazy-then-fence",
+        "lazy-setext-is-text",
+        "lazy-then-html",
+        "quoted-fence-not-lazy",
+        "nested-quote",
+        "quote-in-list-item",
+        "blank-ends-quote",
+    ],
+)
+def test_gpt_12_a_lazy_quote_continuation_opens_no_top_level_paragraph(content, closer):
+    # "continued" after "> quote" is a LAZY continuation of the quote's
+    # paragraph (CommonMark §5.1), not a top-level paragraph. The scanner read
+    # it as one, so "2. item" — which cannot interrupt a paragraph — was taken
+    # as text, and the item's fence as a top-level one whose closer opened a
+    # fence over every later turn. In fact the quote did not match that line,
+    # so its paragraph is not the container there: the list starts, and the
+    # fence is the item's. A setext-looking line is lazy text too (an underline
+    # cannot be lazy, example 94); a quoted FENCE is not a paragraph, so the
+    # line after it ends the quote and is a real paragraph; and a lazy line
+    # inside a list item leaves the item open.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+# ── fork-lane review, third round: the parser decides, the tokenizer closes ──
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("<script", "<!-- \" ' -->\n</script>"),
+        ('<script src="x', "<!-- \" ' -->\n</script>"),
+        ("<div>\n<script a='b", "<!-- \" ' -->\n</script>"),
+        ("<div>\n<script\n\n", "<!-- \" ' -->\n</script>"),
+    ],
+    ids=["bare", "open-double-quote", "open-single-quote-in-div", "block-already-ended"],
+)
+def test_gpt_13_an_unfinished_opening_tag_is_completed_before_it_is_closed(content, closer):
+    # A turn ending in "<script" (no ">") leaves a browser INSIDE the tag: a
+    # "</script>" appended straight after is read as that tag's attributes, its
+    # ">" completes the opener, and the element is still open over every later
+    # turn. The tag is completed first, with a line that ends whichever quoted
+    # attribute value was open and then the tag, and only then is the element
+    # closed -- on the next pass, because what the completed tag opened is only
+    # known once it is complete. The completer begins with "<!--", so CommonMark
+    # emits it raw even when the HTML block that held the tag has already ended.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+    assert sm._scan_rendered(_MARKDOWN_HTML.render(out)).clean
+
+
+def test_gpt_14_a_raw_block_ended_by_another_tags_terminator_frees_the_fence():
+    # CommonMark ends a <pre> block at ANY of </pre>, </script>, </style> or
+    # </textarea>, so the "~~~" after "</script>" is a real fence that must be
+    # closed -- while a browser, for which </script> closed nothing, still has
+    # the <pre> open. Both are closed, fence first.
+    content = "<pre>\n</script>\n~~~"
+    assert sm._unterminated_blocks(content) == "~~~\n</pre>"
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "content,closer",
+    [
+        ("> note\n<span>\n```python\ncode", "```"),
+        ("> ```\n- > a\n===\n  ```", ""),
+        ("text\n    - a\n-\n  ```", "```"),
+    ],
+    ids=["lazy-span-then-fence", "quoted-fence-changes-owner", "over-indented-marker"],
+)
+def test_gpt_15_container_edge_cases_are_decided_by_the_parser(content, closer):
+    # Three shapes the hand-written scanner got wrong, and the reason there is
+    # no scanner any more: a lone "<span>" cannot interrupt a paragraph, so it
+    # lazily continues the quote and the fence after it is top-level; a quoted
+    # fence whose quote is swallowed by a new list item is closed by that item;
+    # and a list marker indented four columns is paragraph text, so the "-"
+    # under it is a setext underline and the fence below is top-level. The
+    # parser answers each one; this module only asks.
+    assert sm._unterminated_blocks(content) == closer
+    out = _render(
+        _bundle(
+            [
+                {"role": "assistant", "content": content, "ts": "t1"},
+                {"role": "user", "content": "later", "ts": "t2"},
+            ]
+        )
+    )
+    _assert_later_heading_is_structural(out)
+
+
+@pytest.mark.parametrize(
+    "rendered,pending_quote,comment_open,open_elements",
+    [
+        ("<p>text</p>", None, False, []),
+        ("<script", "", False, []),
+        ('<script src="x', '"', False, []),
+        ("<a href='x'>", None, False, []),
+        ("<a title='>'>text", None, False, []),
+        ('<a title=">">text', None, False, []),
+        ("<!-- open", None, True, []),
+        ("<!-- a --> <!-- b", None, True, []),
+        ("<!-->", None, False, []),
+        ("<!--->", None, False, []),
+        ("<!-- a --!>", None, False, []),
+        ("<?php", None, True, []),
+        ("<!DOCTYPE", None, True, []),
+        ("<script></script>", None, False, []),
+        ("<script>a</scriptx></script>", None, False, []),
+        ("<script>a</script >", None, False, []),
+        ("<script>a</script", None, False, ["script"]),
+        ("<script><!-- x", None, False, ["script"]),
+        ("<title>x</pre>", None, False, ["title"]),
+        ("<pre><title>x</pre>", None, False, ["pre", "title"]),
+        ("<pre>a</pre>", None, False, []),
+        ("<textarea><b></textarea>", None, False, []),
+        ("<IFRAME>x", None, False, ["iframe"]),
+        ("`<script>`", None, False, ["script"]),
+    ],
+)
+def test_the_html_tokenizer_reads_what_a_browser_would_have_open(
+    rendered, pending_quote, comment_open, open_elements
+):
+    # The second half of the guard: once the Markdown is closed, what a BROWSER
+    # still has open in the rendered HTML. Pinned on raw HTML, independently of
+    # any Markdown: unfinished tags with and without an open quote; ">" inside
+    # a quoted value not ending the tag; comments, including the abruptly closed
+    # "<!-->" and the "--!>" terminator a browser accepts; bogus comments; and
+    # raw-text elements, whose content is opaque until "</name" followed by
+    # whitespace, "/" or ">" -- so "</scriptx>" closes nothing and "<!--"
+    # inside a script opens nothing, and "</script" cut off by the end of the
+    # text is script text (HTML 13.2.5.17), not an unfinished tag.
+    state = sm._scan_rendered(rendered)
+    assert (state.pending_quote, state.comment_open, state.open_elements) == (
+        pending_quote,
+        comment_open,
+        open_elements,
+    )
+    assert state.clean == (pending_quote is None and not comment_open and not open_elements)
+
+
+def test_a_block_this_module_cannot_close_draws_nothing():
+    # The ceiling on closers and the "unknown block" exit are the two ways the
+    # loop ends without a clean parse. Neither invents a closer: a wrong one is
+    # worse than none, because it can open the very construct it claims to end.
+    assert sm._MAX_CLOSERS >= 4
+    assert sm._markdown_need(sm._PARSER.parse("plain\n")) == (False, None)
